@@ -57,6 +57,7 @@ class ChasquiLogApp(ctk.CTk):
         # Variables de estado
         self.carrito = {}  # Diccionario: {id_producto: {'nombre': x, 'precio': y, 'cantidad': z}}
         self.total_actual = 0.0
+        self.metodo_pago = "Efectivo"  # Método seleccionado en el ComboBox
 
         self.crear_navegacion_superior()
 
@@ -292,9 +293,19 @@ class ChasquiLogApp(ctk.CTk):
             ctk.CTkLabel(
                 detalle, text="⚠️ Stock por debajo del mínimo",
                 text_color=self.color_alerta, font=("Helvetica", 12, "bold")
-            ).pack(anchor="w", padx=15, pady=(10, 15))
+            ).pack(anchor="w", padx=15, pady=(10, 5))
         else:
-            ctk.CTkLabel(detalle, text="", height=1).pack(pady=(0, 15))
+            ctk.CTkLabel(detalle, text="", height=1).pack(pady=(5, 0))
+
+        # Separador y botón eliminar
+        ctk.CTkFrame(detalle, height=1, fg_color="#2A2A2A").pack(fill="x", padx=15, pady=(5, 10))
+        ctk.CTkButton(
+            detalle, text="🗑  ELIMINAR ARTÍCULO",
+            fg_color="#3B1010", hover_color="#7F1D1D",
+            text_color="#F87171", height=38, corner_radius=8,
+            font=("Helvetica", 12, "bold"),
+            command=lambda: self.eliminar_producto_bd(id_prod, p[1])
+        ).pack(fill="x", padx=15, pady=(0, 15))
 
     def ajustar_stock(self, id_prod, delta):
         """Suma o resta 1 al stock desde los botones -/+. Nunca baja de 0."""
@@ -334,6 +345,20 @@ class ChasquiLogApp(ctk.CTk):
         self.ent_buscador_inventario.delete(0, 'end')
         self.actualizar_lista_inventario()
 
+    def eliminar_producto_bd(self, id_prod, nombre):
+        """Pide confirmación y elimina el producto de la base de datos."""
+        confirmado = messagebox.askyesno(
+            "Eliminar artículo",
+            f"¿Estás seguro de que deseas eliminar '{nombre}'?\n\nEsta acción no se puede deshacer."
+        )
+        if confirmado:
+            conexion = sqlite3.connect(DB_NAME)
+            cursor = conexion.cursor()
+            cursor.execute("DELETE FROM productos WHERE id = ?", (id_prod,))
+            conexion.commit()
+            conexion.close()
+            self.volver_a_lista_inventario()
+
     # ==========================================
     # PANTALLA 2: DISPENSACIÓN (VENTAS)
     # ==========================================
@@ -347,15 +372,24 @@ class ChasquiLogApp(ctk.CTk):
         frame_izq = ctk.CTkFrame(frame, fg_color=self.color_panel, corner_radius=15)
         frame_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
+        # Buscador en vivo de productos (igual al de inventario)
         frame_busqueda = ctk.CTkFrame(frame_izq, fg_color="transparent")
-        frame_busqueda.pack(fill="x", padx=20, pady=20)
+        frame_busqueda.pack(fill="x", padx=20, pady=(20, 5))
+        self.ent_buscador_venta = ctk.CTkEntry(
+            frame_busqueda, placeholder_text="🔍 Buscar medicamento...",
+            height=40, fg_color="#121212", border_width=0, corner_radius=8
+        )
+        self.ent_buscador_venta.pack(fill="x")
+        self.ent_buscador_venta.bind("<KeyRelease>", self.buscar_productos_venta)
 
-        self.ent_buscador_venta = ctk.CTkEntry(frame_busqueda, placeholder_text="🔍 Ingrese ID del medicamento + Enter", height=40, fg_color="#121212", border_width=0, corner_radius=8)
-        self.ent_buscador_venta.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.ent_buscador_venta.bind("<Return>", self.agregar_al_carrito)
+        # Panel desplegable de sugerencias
+        self.frame_sugerencias_venta = ctk.CTkScrollableFrame(
+            frame_izq, fg_color="#121212", corner_radius=8, height=0
+        )
+        self.frame_sugerencias_venta.pack(fill="x", padx=20, pady=(0, 5))
 
         encabezados = ctk.CTkFrame(frame_izq, fg_color="transparent")
-        encabezados.pack(fill="x", padx=20, pady=(0, 10))
+        encabezados.pack(fill="x", padx=20, pady=(5, 10))
         ctk.CTkLabel(encabezados, text="MEDICAMENTO", font=("Helvetica", 11, "bold"), text_color=self.color_texto_secundario).pack(side="left")
         ctk.CTkLabel(encabezados, text="PRECIO", font=("Helvetica", 11, "bold"), text_color=self.color_texto_secundario, width=80).pack(side="right")
         ctk.CTkLabel(encabezados, text="CANTIDAD", font=("Helvetica", 11, "bold"), text_color=self.color_texto_secundario, width=120).pack(side="right", padx=20)
@@ -373,17 +407,35 @@ class ChasquiLogApp(ctk.CTk):
         frame_der = ctk.CTkFrame(frame, fg_color=self.color_panel, corner_radius=15)
         frame_der.grid(row=0, column=1, sticky="nsew")
 
-        ctk.CTkLabel(frame_der, text="Método de Registro", font=("Helvetica", 14, "bold")).pack(anchor="w", padx=20, pady=20)
+        ctk.CTkLabel(frame_der, text="Método de Registro", font=("Helvetica", 14, "bold")).pack(anchor="w", padx=20, pady=(20, 5))
 
-        ctk.CTkButton(frame_der, text="💵 EFECTIVO ✔", fg_color="#121212", border_width=1, border_color=self.color_acento_verde, hover_color="#2A2A2A", height=45, anchor="w", corner_radius=8).pack(fill="x", padx=20, pady=5)
+        # ComboBox de método de pago
+        self.combo_metodo_pago = ctk.CTkComboBox(
+            frame_der,
+            values=["Efectivo", "Tarjeta", "Billetera digital"],
+            height=45,
+            fg_color="#121212",
+            border_color=self.color_acento_verde,
+            button_color=self.color_acento_verde,
+            button_hover_color="#059669",
+            dropdown_fg_color="#1E1E1E",
+            font=("Helvetica", 13),
+            command=self.cambiar_metodo_pago
+        )
+        self.combo_metodo_pago.set("Efectivo")
+        self.combo_metodo_pago.pack(fill="x", padx=20, pady=(0, 10))
 
-        ctk.CTkLabel(frame_der, text="Efectivo Recibido", font=("Helvetica", 11), text_color=self.color_texto_secundario).pack(anchor="w", padx=20, pady=(20, 0))
-        self.ent_efectivo = ctk.CTkEntry(frame_der, fg_color="#121212", border_width=0, height=40, placeholder_text="S/ 0.00")
+        # Sección efectivo (visible solo cuando método = Efectivo)
+        self.frame_efectivo = ctk.CTkFrame(frame_der, fg_color="transparent")
+        self.frame_efectivo.pack(fill="x")
+
+        ctk.CTkLabel(self.frame_efectivo, text="Efectivo Recibido", font=("Helvetica", 11), text_color=self.color_texto_secundario).pack(anchor="w", padx=20, pady=(10, 0))
+        self.ent_efectivo = ctk.CTkEntry(self.frame_efectivo, fg_color="#121212", border_width=0, height=40, placeholder_text="S/ 0.00")
         self.ent_efectivo.pack(fill="x", padx=20, pady=5)
         self.ent_efectivo.bind("<KeyRelease>", self.calcular_vuelto)
 
-        ctk.CTkLabel(frame_der, text="Vuelto", font=("Helvetica", 11), text_color=self.color_texto_secundario).pack(anchor="w", padx=20, pady=(10, 0))
-        self.lbl_vuelto = ctk.CTkLabel(frame_der, text="S/ 0.00", font=("Helvetica", 16, "bold"), text_color=self.color_acento_verde, fg_color="#121212", height=40, corner_radius=8, anchor="w")
+        ctk.CTkLabel(self.frame_efectivo, text="Vuelto", font=("Helvetica", 11), text_color=self.color_texto_secundario).pack(anchor="w", padx=20, pady=(10, 0))
+        self.lbl_vuelto = ctk.CTkLabel(self.frame_efectivo, text="S/ 0.00", font=("Helvetica", 16, "bold"), text_color=self.color_acento_verde, fg_color="#121212", height=40, corner_radius=8, anchor="w")
         self.lbl_vuelto.pack(fill="x", padx=20, pady=5)
 
         frame_acciones = ctk.CTkFrame(frame_der, fg_color="transparent")
@@ -393,10 +445,87 @@ class ChasquiLogApp(ctk.CTk):
 
         return frame
 
+    def cambiar_metodo_pago(self, seleccion):
+        """Muestra u oculta los campos de efectivo según el método seleccionado."""
+        self.metodo_pago = seleccion
+        if seleccion == "Efectivo":
+            self.frame_efectivo.pack(fill="x")
+        else:
+            self.frame_efectivo.pack_forget()
+
     # ==========================================
     # LÓGICA DE VENTAS Y CARRITO
     # ==========================================
+    def buscar_productos_venta(self, event=None):
+        """Filtra productos en vivo y muestra sugerencias clickeables."""
+        texto = self.ent_buscador_venta.get().strip()
+        for widget in self.frame_sugerencias_venta.winfo_children():
+            widget.destroy()
+
+        if not texto:
+            self.frame_sugerencias_venta.configure(height=0)
+            return
+
+        conexion = sqlite3.connect(DB_NAME)
+        cursor = conexion.cursor()
+        cursor.execute(
+            "SELECT id, nombre, precio, stock_actual FROM productos WHERE nombre LIKE ? ORDER BY nombre LIMIT 6",
+            (f"%{texto}%",)
+        )
+        resultados = cursor.fetchall()
+        conexion.close()
+
+        if not resultados:
+            self.frame_sugerencias_venta.configure(height=0)
+            return
+
+        # Altura dinámica: ~38px por fila, máximo 6 filas
+        altura = min(len(resultados), 6) * 38
+        self.frame_sugerencias_venta.configure(height=altura)
+
+        for p in resultados:
+            id_p, nombre, precio, stock = p
+            sin_stock = stock <= 0
+            color_nombre = self.color_alerta if sin_stock else "white"
+            texto_btn = f"[{id_p}] {nombre}  —  S/ {precio:.2f}  ({stock} uds)"
+
+            fila = ctk.CTkFrame(self.frame_sugerencias_venta, fg_color="transparent", cursor="hand2")
+            fila.pack(fill="x", pady=2)
+            lbl = ctk.CTkLabel(
+                fila, text=texto_btn, font=("Helvetica", 12),
+                text_color=color_nombre, anchor="w"
+            )
+            lbl.pack(fill="x", padx=8, pady=3)
+            if not sin_stock:
+                for w in (fila, lbl):
+                    w.bind("<Button-1>", lambda e, pid=id_p: self.seleccionar_producto_venta(pid))
+
+    def seleccionar_producto_venta(self, id_prod):
+        """Agrega el producto seleccionado desde las sugerencias al carrito."""
+        conexion = sqlite3.connect(DB_NAME)
+        cursor = conexion.cursor()
+        cursor.execute("SELECT nombre, precio, stock_actual FROM productos WHERE id = ?", (id_prod,))
+        prod = cursor.fetchone()
+        conexion.close()
+
+        if not prod or prod[2] <= 0:
+            return
+
+        if id_prod in self.carrito:
+            if self.carrito[id_prod]['cantidad'] < prod[2]:
+                self.carrito[id_prod]['cantidad'] += 1
+        else:
+            self.carrito[id_prod] = {'nombre': prod[0], 'precio': prod[1], 'cantidad': 1, 'stock_max': prod[2]}
+
+        # Limpiar buscador y cerrar sugerencias
+        self.ent_buscador_venta.delete(0, 'end')
+        for widget in self.frame_sugerencias_venta.winfo_children():
+            widget.destroy()
+        self.frame_sugerencias_venta.configure(height=0)
+        self.actualizar_carrito_ui()
+
     def agregar_al_carrito(self, event=None):
+        """Búsqueda por ID exacto (presionando Enter). Mantiene compatibilidad."""
         id_ingresado = self.ent_buscador_venta.get().strip()
         if not id_ingresado.isdigit():
             return
@@ -409,6 +538,9 @@ class ChasquiLogApp(ctk.CTk):
         conexion.close()
 
         self.ent_buscador_venta.delete(0, 'end')
+        for widget in self.frame_sugerencias_venta.winfo_children():
+            widget.destroy()
+        self.frame_sugerencias_venta.configure(height=0)
 
         if not prod:
             return messagebox.showwarning("Error", "ID no existe")
@@ -436,6 +568,12 @@ class ChasquiLogApp(ctk.CTk):
 
         self.actualizar_carrito_ui()
 
+    def eliminar_del_carrito(self, id_prod):
+        """Elimina el producto completo del carrito, sin importar la cantidad."""
+        if id_prod in self.carrito:
+            del self.carrito[id_prod]
+        self.actualizar_carrito_ui()
+
     def actualizar_carrito_ui(self):
         for widget in self.lista_carrito_ui.winfo_children():
             widget.destroy()
@@ -453,7 +591,17 @@ class ChasquiLogApp(ctk.CTk):
             info_frame = ctk.CTkFrame(item, fg_color="transparent")
             info_frame.pack(fill="x")
 
-            ctk.CTkLabel(info_frame, text=datos['nombre'], font=("Helvetica", 14, "bold")).pack(side="left", padx=10)
+            # Botón eliminar (🗑) — quita el producto entero del carrito
+            btn_eliminar = ctk.CTkButton(
+                info_frame, text="🗑", width=30, height=28,
+                fg_color="#3B1010", hover_color="#7F1D1D",
+                text_color="#F87171", corner_radius=6,
+                font=("Helvetica", 13),
+                command=lambda i=id_prod: self.eliminar_del_carrito(i)
+            )
+            btn_eliminar.pack(side="left", padx=(10, 6))
+
+            ctk.CTkLabel(info_frame, text=datos['nombre'], font=("Helvetica", 14, "bold")).pack(side="left", padx=(0, 10))
             ctk.CTkLabel(info_frame, text=f"S/ {subtotal:.2f}", font=("Helvetica", 14)).pack(side="right", padx=(20, 10))
 
             cant_frame = ctk.CTkFrame(info_frame, fg_color="#121212", corner_radius=5)
@@ -471,6 +619,8 @@ class ChasquiLogApp(ctk.CTk):
         self.calcular_vuelto()
 
     def calcular_vuelto(self, event=None):
+        if self.metodo_pago != "Efectivo":
+            return
         try:
             efectivo = float(self.ent_efectivo.get())
             vuelto = efectivo - self.total_actual
@@ -484,6 +634,9 @@ class ChasquiLogApp(ctk.CTk):
     def limpiar_carrito(self):
         self.carrito = {}
         self.ent_efectivo.delete(0, 'end')
+        self.combo_metodo_pago.set("Efectivo")
+        self.metodo_pago = "Efectivo"
+        self.frame_efectivo.pack(fill="x")
         self.actualizar_carrito_ui()
 
     def completar_registro(self):
