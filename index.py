@@ -91,23 +91,33 @@ def hay_internet(timeout=2.5):
 
 
 def obtener_ubicacion_ip():
-    """Obtiene ubicación aproximada por IP usando ipapi.co (gratis, sin key).
-    Retorna dict con lat, lon, ciudad, region o None si falla."""
+    """Obtiene ubicación aproximada por IP usando ipinfo.io (más estable).
+    >>> CAMBIO: Proveedor actualizado y User-Agent de navegador simulado <<<"""
     try:
+        # Usamos un User-Agent de navegador real para evitar el bloqueo del servidor
         req = urllib.request.Request(
-            "https://ipapi.co/json/",
-            headers={"User-Agent": "ChasquiLog/1.0"}
+            "https://ipinfo.io/json",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+            
+            # ipinfo devuelve la latitud y longitud juntas en un solo string: "lat,lon"
+            if "loc" in data:
+                lat, lon = map(float, data["loc"].split(","))
+            else:
+                lat, lon = 0.0, 0.0
+                
             return {
-                "lat":    float(data.get("latitude", 0)),
-                "lon":    float(data.get("longitude", 0)),
+                "lat": lat,
+                "lon": lon,
                 "ciudad": data.get("city", "Desconocida"),
                 "region": data.get("region", ""),
-                "pais":   data.get("country_name", "Perú"),
+                "pais": data.get("country", "Perú"),
             }
-    except Exception:
+    except Exception as e:
+        # Imprime el error en la consola oculta para facilitar la depuración si vuelve a fallar
+        print(f"[Error de Geolocalización]: {e}")
         return None
 
 
@@ -889,7 +899,7 @@ class ChasquiLogApp(ctk.CTk):
         ctk.CTkLabel(panel_informe, text="INFORME DEL TURNO", font=("Helvetica", 14, "bold"), text_color="white").pack(anchor="w", padx=20, pady=(20, 10))
         self.frame_informe_turno = ctk.CTkScrollableFrame(panel_informe, fg_color="transparent")
         self.frame_informe_turno.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma (offline)...",
+        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma",
                                               font=("Helvetica", 13), text_color=self.color_texto_secundario,
                                               justify="left", anchor="nw", wraplength=400)
         self.lbl_informe_turno.pack(fill="both", expand=True, padx=5, pady=5)
@@ -975,7 +985,7 @@ class ChasquiLogApp(ctk.CTk):
 
         for w in self.frame_informe_turno.winfo_children():
             w.destroy()
-        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma (offline)...",
+        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma",
                                               font=("Helvetica", 13), text_color=self.color_texto_secundario,
                                               justify="left", anchor="nw", wraplength=400)
         self.lbl_informe_turno.pack(fill="both", expand=True, padx=5, pady=5)
@@ -1838,7 +1848,7 @@ class ChasquiLogApp(ctk.CTk):
         cab = ctk.CTkFrame(panel_der, fg_color="transparent")
         cab.pack(fill="x", padx=20, pady=(20, 10))
         ctk.CTkLabel(cab, text="🧠", font=("Helvetica", 16)).pack(side="left")
-        ctk.CTkLabel(cab, text="INSIGHT DE GEMMA (OFFLINE)", font=("Helvetica", 13, "bold"), text_color=self.color_acento_verde).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(cab, text="INSIGHT DE GEMMA", font=("Helvetica", 13, "bold"), text_color=self.color_acento_verde).pack(side="left", padx=(8, 0))
         self.frame_insight_gemma = ctk.CTkScrollableFrame(panel_der, fg_color="transparent")
         self.frame_insight_gemma.pack(fill="both", expand=True, padx=15, pady=(0, 10))
         self.lbl_insight_gemma = ctk.CTkLabel(self.frame_insight_gemma, text="Generando análisis con Gemma...",
