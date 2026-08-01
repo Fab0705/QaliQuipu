@@ -79,8 +79,7 @@ def llamar_gemma(prompt: str):
 
 
 def hay_internet(timeout=2.5):
-    """Detecta conexión real abriendo un socket a DNS públicos.
-    Más rápido y confiable que una petición HTTP."""
+    """Detecta conexión real abriendo un socket a DNS públicos."""
     for host, port in (("8.8.8.8", 53), ("1.1.1.1", 53)):
         try:
             s = socket.create_connection((host, port), timeout=timeout)
@@ -89,6 +88,150 @@ def hay_internet(timeout=2.5):
         except OSError:
             continue
     return False
+
+
+def obtener_ubicacion_ip():
+    """Obtiene ubicación aproximada por IP usando ipinfo.io (más estable).
+    >>> CAMBIO: Proveedor actualizado y User-Agent de navegador simulado <<<"""
+    try:
+        # Usamos un User-Agent de navegador real para evitar el bloqueo del servidor
+        req = urllib.request.Request(
+            "https://ipinfo.io/json",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            
+            # ipinfo devuelve la latitud y longitud juntas en un solo string: "lat,lon"
+            if "loc" in data:
+                lat, lon = map(float, data["loc"].split(","))
+            else:
+                lat, lon = 0.0, 0.0
+                
+            return {
+                "lat": lat,
+                "lon": lon,
+                "ciudad": data.get("city", "Desconocida"),
+                "region": data.get("region", ""),
+                "pais": data.get("country", "Perú"),
+            }
+    except Exception as e:
+        # Imprime el error en la consola oculta para facilitar la depuración si vuelve a fallar
+        print(f"[Error de Geolocalización]: {e}")
+        return None
+
+
+# Códigos WMO → emoji + descripción legible
+_WMO = {
+    0: ("☀️", "Despejado"),     1: ("🌤", "Mayormente despejado"),
+    2: ("⛅", "Parcialmente nublado"), 3: ("☁️", "Nublado"),
+    45: ("🌫", "Niebla"),        48: ("🌫", "Niebla con escarcha"),
+    51: ("🌦", "Llovizna"),      53: ("🌦", "Llovizna moderada"),   55: ("🌧", "Llovizna densa"),
+    61: ("🌧", "Lluvia leve"),   63: ("🌧", "Lluvia moderada"),     65: ("🌧", "Lluvia fuerte"),
+    71: ("🌨", "Nevada leve"),   73: ("🌨", "Nevada moderada"),     75: ("❄️", "Nevada fuerte"),
+    77: ("🌨", "Granizo"),
+    80: ("🌦", "Chubascos"),     81: ("🌧", "Chubascos mod."),      82: ("⛈", "Chubascos fuertes"),
+    85: ("🌨", "Chubascos nieve"), 86: ("❄️", "Chubascos nieve fuertes"),
+    95: ("⛈", "Tormenta"),      96: ("⛈", "Tormenta c/granizo"), 99: ("⛈", "Tormenta fuerte"),
+}
+
+
+def obtener_pronostico_clima(lat, lon):
+    """Obtiene pronóstico de 7 días desde Open-Meteo (gratis, sin API key).
+    Retorna lista de dicts: {fecha, emoji, desc, lluvia_mm, viento_kmh, horas_lluvia, malo}"""
+    try:
+        params = urllib.parse.urlencode({
+            "latitude": lat, "longitude": lon,
+            "daily": "weather_code,precipitation_sum,wind_speed_10m_max,precipitation_hours",
+            "timezone": "auto", "forecast_days": 7
+        })
+        url = f"https://api.open-meteo.com/v1/forecast?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "ChasquiLog/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d = json.loads(resp.read().decode("utf-8"))["daily"]
+        dias = []
+        nombres_dia = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+        for i in range(len(d["time"])):
+            fecha_str  = d["time"][i]                   # "2025-08-02"
+            fecha_obj  = datetime.strptime(fecha_str, "%Y-%m-%d")
+            wmo        = int(d["weather_code"][i] or 0)
+            lluvia     = float(d["precipitation_sum"][i] or 0)
+            viento     = float(d["wind_speed_10m_max"][i] or 0)
+            h_lluvia   = float(d["precipitation_hours"][i] or 0)
+            emoji, desc = _WMO.get(wmo, ("🌡", "Variable"))
+            malo = lluvia > 5 or viento > 50 or wmo in (65, 75, 82, 86, 95, 96, 99)
+            dias.append({
+                "fecha":      fecha_str,
+                "nombre_dia": nombres_dia[fecha_obj.weekday()],
+                "dia_num":    fecha_obj.day,
+                "emoji":      emoji,
+                "desc":       desc,
+                "lluvia_mm":  round(lluvia, 1),
+                "viento_kmh": round(viento, 1),
+                "h_lluvia":   round(h_lluvia, 1),
+                "malo":       malo,
+            })
+        return dias
+    except Exception:
+        return []
+
+
+def obtener_mercados_cercanos(lat, lon, radio_km=30):
+    """Busca farmacias, mercados y tiendas en OpenStreetMap (Overpass API, gratis).
+    Amplía a 60 km si no encuentra nada. Retorna lista de dicts {nombre, tipo, dist_km}."""
+    def _consulta(lat, lon, radio_m):
+        query = (
+            f"[out:json][timeout:10];"
+            f"("
+            f"node[\"amenity\"=\"pharmacy\"](around:{radio_m},{lat},{lon});"
+            f"node[\"amenity\"=\"hospital\"](around:{radio_m},{lat},{lon});"
+            f"node[\"shop\"=\"supermarket\"](around:{radio_m},{lat},{lon});"
+            f"node[\"shop\"=\"general\"](around:{radio_m},{lat},{lon});"
+            f"node[\"shop\"=\"medical_supply\"](around:{radio_m},{lat},{lon});"
+            f");"
+            f"out body;"
+        )
+        url = "https://overpass-api.de/api/interpreter"
+        data = urllib.parse.urlencode({"data": query}).encode("utf-8")
+        req  = urllib.request.Request(url, data=data,
+                                      headers={"Content-Type": "application/x-www-form-urlencoded",
+                                               "User-Agent": "ChasquiLog/1.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            return json.loads(resp.read().decode("utf-8"))["elements"]
+
+    import math
+    def _dist(lat1, lon1, lat2, lon2):
+        R = 6371
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
+        return round(R * 2 * math.asin(math.sqrt(a)), 1)
+
+    iconos_tipo = {
+        "pharmacy": ("💊", "Farmacia"), "hospital": ("🏥", "Hospital"),
+        "supermarket": ("🛒", "Supermercado"), "general": ("🏪", "Tienda"),
+        "medical_supply": ("🩺", "Insumos médicos"),
+    }
+    try:
+        elementos = _consulta(lat, lon, radio_km * 1000)
+        if not elementos:
+            elementos = _consulta(lat, lon, 60 * 1000)   # ampliar a 60 km
+        resultados = []
+        vistos = set()
+        for e in elementos:
+            tags   = e.get("tags", {})
+            nombre = tags.get("name") or tags.get("brand") or "Sin nombre"
+            if nombre in vistos:
+                continue
+            vistos.add(nombre)
+            tipo_osm = tags.get("amenity") or tags.get("shop", "")
+            icono, tipo_label = iconos_tipo.get(tipo_osm, ("🏪", "Establecimiento"))
+            dist = _dist(lat, lon, e.get("lat", lat), e.get("lon", lon))
+            resultados.append({"nombre": nombre, "tipo": tipo_label, "icono": icono, "dist_km": dist})
+        resultados.sort(key=lambda x: x["dist_km"])
+        return resultados[:8]   # máx 8 lugares
+    except Exception:
+        return []
 
 
 def enviar_whatsapp_callmebot(numero: str, mensaje: str):
@@ -756,7 +899,7 @@ class ChasquiLogApp(ctk.CTk):
         ctk.CTkLabel(panel_informe, text="INFORME DEL TURNO", font=("Helvetica", 14, "bold"), text_color="white").pack(anchor="w", padx=20, pady=(20, 10))
         self.frame_informe_turno = ctk.CTkScrollableFrame(panel_informe, fg_color="transparent")
         self.frame_informe_turno.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma (offline)...",
+        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma",
                                               font=("Helvetica", 13), text_color=self.color_texto_secundario,
                                               justify="left", anchor="nw", wraplength=400)
         self.lbl_informe_turno.pack(fill="both", expand=True, padx=5, pady=5)
@@ -842,7 +985,7 @@ class ChasquiLogApp(ctk.CTk):
 
         for w in self.frame_informe_turno.winfo_children():
             w.destroy()
-        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma (offline)...",
+        self.lbl_informe_turno = ctk.CTkLabel(self.frame_informe_turno, text="Generando análisis con Gemma",
                                               font=("Helvetica", 13), text_color=self.color_texto_secundario,
                                               justify="left", anchor="nw", wraplength=400)
         self.lbl_informe_turno.pack(fill="both", expand=True, padx=5, pady=5)
@@ -936,83 +1079,227 @@ class ChasquiLogApp(ctk.CTk):
                      text_color=COLOR_VERDE).pack(anchor="w", padx=12, pady=8)
 
     def _worker_alerta_predictiva(self, datos):
+        """Worker enriquecido: obtiene clima + geolocalización + mercados y genera
+        una recomendación de día/hora óptimo para reabastecer."""
         if not datos["criticos"]:
-            self.after(0, lambda: self.lbl_alerta_predictiva.configure(text="No hay productos en estado crítico en este momento."))
+            self.after(0, lambda: self._mostrar_alerta_sin_criticos())
             return
-        criticos_txt = ", ".join(f"{n}: {s} unidades (mínimo {m})" for n, s, m in datos["criticos"])
+
+        criticos_txt = ", ".join(
+            f"{n}: {s} unidades (mínimo {m})" for n, s, m in datos["criticos"])
+        p_urgente = min(datos["criticos"], key=lambda x: x[1])
+
+        # --- Intentar obtener datos de internet ---
+        ubicacion   = None
+        pronostico  = []
+        mercados    = []
+        tiene_net   = hay_internet()
+
+        if tiene_net:
+            ubicacion  = obtener_ubicacion_ip()
+            if ubicacion:
+                pronostico = obtener_pronostico_clima(ubicacion["lat"], ubicacion["lon"])
+                mercados   = obtener_mercados_cercanos(ubicacion["lat"], ubicacion["lon"])
+
+        # --- Construir prompt enriquecido ---
+        hoy = datetime.now().strftime("%A %d de %B de %Y")
+        seccion_clima = ""
+        dias_buenos   = []
+        dias_malos    = []
+        if pronostico:
+            resumen_dias = []
+            for d in pronostico:
+                estado = "⚠️ MALO (lluvia/tormenta)" if d["malo"] else "✅ Bueno"
+                resumen_dias.append(
+                    f"  {d['nombre_dia']} {d['dia_num']}: {d['desc']}, "
+                    f"lluvia {d['lluvia_mm']}mm, viento {d['viento_kmh']}km/h — {estado}")
+                if d["malo"]:
+                    dias_malos.append(f"{d['nombre_dia']} {d['dia_num']}")
+                else:
+                    dias_buenos.append(f"{d['nombre_dia']} {d['dia_num']}")
+            seccion_clima = "Pronóstico climático próximos 7 días:\n" + "\n".join(resumen_dias)
+
+        seccion_lugares = ""
+        if mercados:
+            lista_m = "\n".join(
+                f"  - {m['nombre']} ({m['tipo']}) a {m['dist_km']} km"
+                for m in mercados[:5])
+            seccion_lugares = f"Lugares cercanos para comprar (OpenStreetMap):\n{lista_m}"
+
+        seccion_ubicacion = ""
+        if ubicacion:
+            seccion_ubicacion = (
+                f"Ubicación detectada: {ubicacion['ciudad']}, "
+                f"{ubicacion['region']}, {ubicacion['pais']}")
+
         prompt = (
-            "Eres el motor predictivo de una posta médica rural sin internet. "
-            "Con estos datos reales de stock crítico, escribe UNA sola alerta corta (máx. 2 líneas) en español, "
-            "en tono urgente pero profesional, priorizando el producto más urgente. "
-            "No inventes fechas exactas; habla en términos de urgencia relativa.\n\n"
-            f"Stock crítico actual: {criticos_txt}.")
-        resultado = llamar_gemma(prompt)
-        if resultado is None:
-            p = min(datos["criticos"], key=lambda x: x[1])
-            self.after(0, lambda p=p: self._mostrar_alerta_offline(p, datos["criticos"]))
-        else:
-            self.after(0, lambda: self._mostrar_alerta_texto(resultado))
+            "Eres el asesor logístico de una posta médica rural en Perú. "
+            "El responsable de la posta vive en zona rural y debe viajar en bus a la ciudad "
+            "o mercado más cercano para comprar medicamentos. El viaje puede verse afectado "
+            "por lluvias fuertes, tormentas o vientos que bloquean caminos rurales.\n\n"
+            f"Fecha actual: {hoy}\n"
+            f"Stock crítico urgente: {criticos_txt}\n"
+            f"{seccion_ubicacion}\n"
+            f"{seccion_clima}\n"
+            f"{seccion_lugares}\n\n"
+            "Con esta información REAL, redacta en español un mensaje breve (máx 5 líneas) que:\n"
+            "1. Indique cuál es el MEJOR DÍA de esta semana para ir a comprar (considera el clima).\n"
+            "2. Sugiera a qué hora salir (mañana temprano si puede, antes de lluvias).\n"
+            "3. Mencione los lugares más cercanos donde puede comprar.\n"
+            "4. Advierta sobre los días con mal clima que debe evitar.\n"
+            "Sé directo, práctico y en tono amigable. No inventes datos que no te di."
+        )
 
-    def _mostrar_alerta_texto(self, texto):
-        """Muestra la respuesta de Gemma como texto en el panel de alerta predictiva."""
+        resultado_gemma = llamar_gemma(prompt)
+        self.after(0, lambda: self._mostrar_alerta_completa(
+            resultado_gemma, p_urgente, datos["criticos"],
+            pronostico, mercados, ubicacion
+        ))
+
+    def _mostrar_alerta_sin_criticos(self):
+        """Panel cuando no hay stock crítico."""
         for w in self.frame_alerta_predictiva.winfo_children():
             w.destroy()
-        lbl = ctk.CTkLabel(self.frame_alerta_predictiva, text=texto, font=("Helvetica", 13),
-                           text_color="white", justify="left", anchor="nw", wraplength=340)
-        lbl.pack(fill="both", expand=True, padx=5, pady=5)
+        ctk.CTkLabel(self.frame_alerta_predictiva, text="✅", font=("Helvetica", 28)).pack(pady=(20, 6))
+        ctk.CTkLabel(self.frame_alerta_predictiva, text="Sin productos en estado crítico",
+                     font=("Helvetica", 12), text_color=self.color_texto_secundario).pack()
 
-    def _mostrar_alerta_offline(self, producto_critico, todos_criticos):
-        """Construye tarjetas de alerta estructuradas cuando Gemma no está disponible."""
+    def _mostrar_alerta_completa(self, texto_gemma, p_urgente, todos_criticos,
+                                  pronostico, mercados, ubicacion):
+        """Renderiza el panel de alerta predictiva completo con clima, IA y mercados."""
         for w in self.frame_alerta_predictiva.winfo_children():
             w.destroy()
 
-        COLOR_TARJETA = "#2E1A10"
-        COLOR_ALERTA  = self.color_alerta
-        COLOR_SEC     = self.color_texto_secundario
+        C_ALERTA  = self.color_alerta
+        C_ROJO    = self.color_rojo
+        C_VERDE   = self.color_acento_verde
+        C_AZUL    = self.color_acento_azul
+        C_SEC     = self.color_texto_secundario
+        C_PANEL   = "#1E1E1E"
+        C_URGENTE = "#2E1A10"
 
-        # --- Título urgente ---
-        titulo_frame = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="transparent")
-        titulo_frame.pack(fill="x", pady=(4, 8))
-        ctk.CTkLabel(titulo_frame, text="🚨", font=("Helvetica", 18)).pack(side="left")
-        ctk.CTkLabel(titulo_frame, text=" Alerta de stock crítico",
-                     font=("Helvetica", 14, "bold"), text_color=COLOR_ALERTA).pack(side="left")
+        def sep(color="#2A2A2A"):
+            ctk.CTkFrame(self.frame_alerta_predictiva,
+                         fg_color=color, height=1).pack(fill="x", pady=(6, 4), padx=2)
 
-        # --- Producto más urgente (tarjeta destacada) ---
-        tarjeta_urgente = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color=COLOR_TARJETA,
-                                       corner_radius=10, border_width=1, border_color=COLOR_ALERTA)
-        tarjeta_urgente.pack(fill="x", pady=(0, 6), padx=2)
-        ctk.CTkLabel(tarjeta_urgente, text="Más urgente", font=("Helvetica", 9, "bold"),
-                     text_color=COLOR_ALERTA).pack(anchor="w", padx=12, pady=(8, 0))
-        ctk.CTkLabel(tarjeta_urgente, text=producto_critico[0],
-                     font=("Helvetica", 14, "bold"), text_color="white").pack(anchor="w", padx=12)
+        # ══════════════════════════════════════════
+        # 1. CABECERA: stock más urgente
+        # ══════════════════════════════════════════
+        cab = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color=C_URGENTE,
+                           corner_radius=10, border_width=1, border_color=C_ALERTA)
+        cab.pack(fill="x", pady=(2, 4), padx=2)
+        ctk.CTkLabel(cab, text="🚨  Más urgente", font=("Helvetica", 9, "bold"),
+                     text_color=C_ALERTA).pack(anchor="w", padx=12, pady=(8, 0))
+        ctk.CTkLabel(cab, text=p_urgente[0], font=("Helvetica", 14, "bold"),
+                     text_color="white").pack(anchor="w", padx=12)
+        fila_s = ctk.CTkFrame(cab, fg_color="transparent")
+        fila_s.pack(fill="x", padx=12, pady=(2, 10))
+        ctk.CTkLabel(fila_s, text=f"Stock: {p_urgente[1]} uds",
+                     font=("Helvetica", 11), text_color=C_ALERTA).pack(side="left")
+        ctk.CTkLabel(fila_s, text=f"Mínimo: {p_urgente[2]} uds",
+                     font=("Helvetica", 11), text_color=C_SEC).pack(side="right")
 
-        fila_stock = ctk.CTkFrame(tarjeta_urgente, fg_color="transparent")
-        fila_stock.pack(fill="x", padx=12, pady=(4, 10))
-        ctk.CTkLabel(fila_stock, text=f"Stock: {producto_critico[1]} uds",
-                     font=("Helvetica", 11), text_color=COLOR_ALERTA).pack(side="left")
-        ctk.CTkLabel(fila_stock, text=f"Mínimo: {producto_critico[2]} uds",
-                     font=("Helvetica", 11), text_color=COLOR_SEC).pack(side="right")
-
-        # --- Otros críticos (si hay más de uno) ---
-        otros = [x for x in todos_criticos if x[0] != producto_critico[0]]
+        # otros críticos
+        otros = [x for x in todos_criticos if x[0] != p_urgente[0]]
         if otros:
-            ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="#3A2A2A", height=1).pack(fill="x", pady=(4, 4), padx=2)
-            ctk.CTkLabel(self.frame_alerta_predictiva, text="Otros en estado crítico",
-                         font=("Helvetica", 10, "bold"), text_color=COLOR_SEC, anchor="w").pack(anchor="w", padx=2, pady=(0, 2))
+            ctk.CTkLabel(self.frame_alerta_predictiva, text="Otros productos críticos",
+                         font=("Helvetica", 10, "bold"), text_color=C_SEC).pack(anchor="w", padx=4, pady=(4, 2))
             for nombre, stock, minimo in otros:
-                fila = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="#1E1E1E", corner_radius=8)
-                fila.pack(fill="x", pady=2, padx=2)
-                ctk.CTkLabel(fila, text=nombre, font=("Helvetica", 11), text_color="white").pack(side="left", padx=10, pady=6)
-                ctk.CTkLabel(fila, text=f"{stock}/{minimo}", font=("Helvetica", 11),
-                             text_color=COLOR_ALERTA).pack(side="right", padx=10)
+                f = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color=C_PANEL, corner_radius=7)
+                f.pack(fill="x", pady=2, padx=2)
+                ctk.CTkLabel(f, text=nombre, font=("Helvetica", 11),
+                             text_color="white").pack(side="left", padx=10, pady=6)
+                ctk.CTkLabel(f, text=f"{stock}/{minimo}", font=("Helvetica", 11),
+                             text_color=C_ALERTA).pack(side="right", padx=10)
 
-        # --- Acción recomendada ---
-        ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="#3A2A2A", height=1).pack(fill="x", pady=(8, 4), padx=2)
-        accion = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="#2E1A10", corner_radius=8,
-                              border_width=1, border_color=COLOR_ALERTA)
-        accion.pack(fill="x", pady=2, padx=2)
-        ctk.CTkLabel(accion, text="⚠️  Priorizar reabastecimiento de inmediato",
-                     font=("Helvetica", 11, "bold"), text_color=COLOR_ALERTA).pack(anchor="w", padx=12, pady=8)
+        # ══════════════════════════════════════════
+        # 2. RECOMENDACIÓN DE GEMMA (si disponible)
+        # ══════════════════════════════════════════
+        sep()
+        if texto_gemma:
+            ctk.CTkLabel(self.frame_alerta_predictiva,
+                         text="🤖  Recomendación de Gemma",
+                         font=("Helvetica", 11, "bold"), text_color=C_VERDE).pack(anchor="w", padx=4, pady=(0, 4))
+            burbuja = ctk.CTkFrame(self.frame_alerta_predictiva,
+                                   fg_color="#0F2A20", corner_radius=10,
+                                   border_width=1, border_color=C_VERDE)
+            burbuja.pack(fill="x", padx=2, pady=(0, 4))
+            ctk.CTkLabel(burbuja, text=texto_gemma, font=("Helvetica", 12),
+                         text_color="white", justify="left", anchor="nw",
+                         wraplength=310).pack(anchor="w", padx=12, pady=10)
+        else:
+            aviso = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color=C_URGENTE,
+                                 corner_radius=8, border_width=1, border_color=C_ALERTA)
+            aviso.pack(fill="x", padx=2, pady=(0, 4))
+            ctk.CTkLabel(aviso, text="⚠️  Priorizar reabastecimiento de inmediato",
+                         font=("Helvetica", 11, "bold"),
+                         text_color=C_ALERTA).pack(anchor="w", padx=12, pady=8)
+
+        # ══════════════════════════════════════════
+        # 3. PRONÓSTICO CLIMÁTICO (7 días)
+        # ══════════════════════════════════════════
+        if pronostico:
+            sep()
+            # ubicación
+            if ubicacion:
+                ctk.CTkLabel(self.frame_alerta_predictiva,
+                             text=f"📍 {ubicacion['ciudad']}, {ubicacion['region']}",
+                             font=("Helvetica", 10), text_color=C_SEC).pack(anchor="w", padx=4)
+            ctk.CTkLabel(self.frame_alerta_predictiva,
+                         text="🌤  Pronóstico próximos 7 días",
+                         font=("Helvetica", 11, "bold"), text_color="white").pack(anchor="w", padx=4, pady=(4, 6))
+
+            # fila de chips de días
+            grid_dias = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="transparent")
+            grid_dias.pack(fill="x", padx=2)
+            for idx, d in enumerate(pronostico):
+                color_chip = "#2E1A10" if d["malo"] else "#0F1E0F"
+                borde_chip = C_ALERTA if d["malo"] else C_VERDE
+                chip = ctk.CTkFrame(grid_dias, fg_color=color_chip, corner_radius=8,
+                                    border_width=1, border_color=borde_chip, width=46)
+                chip.grid(row=0, column=idx, padx=2, pady=2, sticky="nsew")
+                chip.grid_propagate(False)
+                grid_dias.grid_columnconfigure(idx, weight=1)
+                ctk.CTkLabel(chip, text=d["nombre_dia"], font=("Helvetica", 8, "bold"),
+                             text_color=C_ALERTA if d["malo"] else C_VERDE).pack(pady=(5, 0))
+                ctk.CTkLabel(chip, text=d["emoji"], font=("Helvetica", 14)).pack()
+                ctk.CTkLabel(chip, text=f"{d['lluvia_mm']}mm",
+                             font=("Helvetica", 7), text_color=C_SEC).pack(pady=(0, 4))
+
+            # leyenda
+            leyenda = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color="transparent")
+            leyenda.pack(fill="x", pady=(4, 0), padx=4)
+            ctk.CTkLabel(leyenda, text="🟢 Buen día para viajar",
+                         font=("Helvetica", 9), text_color=C_VERDE).pack(side="left")
+            ctk.CTkLabel(leyenda, text="🔴 Evitar (mal clima)",
+                         font=("Helvetica", 9), text_color=C_ALERTA).pack(side="right")
+
+        elif not hay_internet():
+            sep()
+            no_net = ctk.CTkFrame(self.frame_alerta_predictiva, fg_color=C_PANEL,
+                                  corner_radius=8)
+            no_net.pack(fill="x", padx=2, pady=2)
+            ctk.CTkLabel(no_net, text="📡  Sin conexión — pronóstico no disponible",
+                         font=("Helvetica", 11), text_color=C_SEC).pack(padx=12, pady=8)
+
+        # ══════════════════════════════════════════
+        # 4. LUGARES CERCANOS PARA COMPRAR
+        # ══════════════════════════════════════════
+        if mercados:
+            sep()
+            ctk.CTkLabel(self.frame_alerta_predictiva,
+                         text="🏪  Lugares cercanos para comprar",
+                         font=("Helvetica", 11, "bold"), text_color="white").pack(anchor="w", padx=4, pady=(0, 4))
+            for m in mercados[:5]:
+                fm = ctk.CTkFrame(self.frame_alerta_predictiva,
+                                  fg_color=C_PANEL, corner_radius=8)
+                fm.pack(fill="x", pady=2, padx=2)
+                ctk.CTkLabel(fm, text=f"{m['icono']}  {m['nombre']}",
+                             font=("Helvetica", 11), text_color="white").pack(side="left", padx=10, pady=6)
+                dist_color = C_VERDE if m["dist_km"] < 15 else C_ALERTA
+                ctk.CTkLabel(fm, text=f"{m['dist_km']} km",
+                             font=("Helvetica", 11, "bold"),
+                             text_color=dist_color).pack(side="right", padx=10)
 
     # ==========================================
     # PANTALLA 1: INVENTARIO
@@ -1561,7 +1848,7 @@ class ChasquiLogApp(ctk.CTk):
         cab = ctk.CTkFrame(panel_der, fg_color="transparent")
         cab.pack(fill="x", padx=20, pady=(20, 10))
         ctk.CTkLabel(cab, text="🧠", font=("Helvetica", 16)).pack(side="left")
-        ctk.CTkLabel(cab, text="INSIGHT DE GEMMA (OFFLINE)", font=("Helvetica", 13, "bold"), text_color=self.color_acento_verde).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(cab, text="INSIGHT DE GEMMA", font=("Helvetica", 13, "bold"), text_color=self.color_acento_verde).pack(side="left", padx=(8, 0))
         self.frame_insight_gemma = ctk.CTkScrollableFrame(panel_der, fg_color="transparent")
         self.frame_insight_gemma.pack(fill="both", expand=True, padx=15, pady=(0, 10))
         self.lbl_insight_gemma = ctk.CTkLabel(self.frame_insight_gemma, text="Generando análisis con Gemma...",
